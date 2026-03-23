@@ -1,0 +1,2 @@
+PyAudio==0.2.14
+pyperclip==1.11.0
