@@ -1,8 +1,8 @@
 from config import NOTES_DIR
 from pathlib import Path
-from get_text import get_text_note
-from get_image import get_latest_screenshot
-from get_audio import toggle_audio
+from controller.get_text import get_text_note
+from controller.get_image import get_latest_screenshot
+from controller.get_audio import toggle_audio
 
 current_session = None
 

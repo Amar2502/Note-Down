@@ -75,5 +75,8 @@ def toggle_audio():
             "path": filename
         }
 
+def is_audio_recording():
+    return is_recording
+
 def cleanup():
     audio.terminate()
