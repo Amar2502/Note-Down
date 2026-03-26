@@ -24,24 +24,19 @@ def start_session(name, folder=""):
     safe_name = sanitize_filename(name)
 
     # 🔥 Folder handling
-    if folder:
-        folder_path = Path(NOTES_DIR) / folder
-    else:
-        folder_path = Path(NOTES_DIR)
-
+    folder_path = Path(NOTES_DIR) / folder if folder else Path(NOTES_DIR)
     folder_path.mkdir(parents=True, exist_ok=True)
 
     # 🔥 File path
     path = folder_path / f"{safe_name}.md"
 
-    # 🔥 Avoid overwrite
-    counter = 1
-    original_path = path
-    while path.exists():
-        path = original_path.with_name(f"{safe_name}-{counter}.md")
-        counter += 1
+    # 🔥 If file exists → continue session
+    if path.exists():
+        print(f"🔁 Continuing existing session: {path}")
+        current_session = path
+        return
 
-    # 🔥 Create frontmatter
+    # 🔥 Create new file
     today = datetime.now().strftime("%Y-%m-%d")
 
     content = f"""---
@@ -55,8 +50,7 @@ tags: []
     path.write_text(content, encoding="utf-8")
 
     current_session = path
-    print(f"🚀 Started session: {path}")
-
+    print(f"🚀 Started new session: {path}")
 
 def end_session():
     global current_session
@@ -67,7 +61,6 @@ def end_session():
 
     print(f"🏁 Ended session: {current_session.name}")
     current_session = None
-
 
 def save_note(note):
     global current_session
@@ -81,21 +74,40 @@ def save_note(note):
 
     path = current_session
 
+    content = ""
+    if path.exists():
+        content = path.read_text(encoding="utf-8")
+
     with open(path, "a", encoding="utf-8") as f:
+
+        # Add main heading if missing
+        if "# Session Notes" not in content:
+            f.write("\n# Session Notes\n")
 
         # ---- TEXT ----
         if note["type"] == "text":
-            f.write("```\n")
-            f.write(note["text"])
-            f.write("\n```\n\n")
+            if "## 📝 Notes" not in content:
+                if content.strip():
+                    f.write("\n***\n")
+                    f.write("```")
+            f.write(f"- {note['text'].strip()}\n")
+            f.write("```")
 
         # ---- IMAGE ----
         elif note["type"] == "image":
-            f.write(f'![Screenshot]({note["filename"]})\n\n')
+            if "## 📸 Screenshots" not in content:
+                if content.strip():
+                    f.write("\n***\n")
+            f.write(f"![[{note['filename']}]]")
 
         # ---- AUDIO ----
         elif note["type"] == "audio":
-            f.write(f'<audio controls src="{note["filename"]}"></audio>\n\n')
+            if "## 🎤 Audio" not in content:
+                if content.strip():
+                    f.write("\n***\n")
+            f.write(f"![[{note['filename']}]]")
+
+        f.write("\n")
 
     print(f"✅ Saved note: {note['type']}")
 

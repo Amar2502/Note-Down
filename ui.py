@@ -1,193 +1,598 @@
 import sys
+from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QPoint, QVariantAnimation
+from PyQt6.QtCore import Qt, QTimer, QPoint, QVariantAnimation, QPropertyAnimation
 from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QHBoxLayout,
-    QLabel, QToolTip, QDialog, QLineEdit, QComboBox
+    QLabel, QToolTip, QDialog, QLineEdit, QTreeWidget, QTreeWidgetItem, QStyle, QFrame
 )
 
 import core
-from utils.folder import get_folders
+from utils.folder import get_folders, get_file_names
 from config import NOTES_DIR
-
-# ------------------ FOLDER FORMAT ------------------
-
-def format_folders_for_tree(paths):
-    formatted = []
-    mapping = {}
-    for path in sorted(paths):
-        depth = path.count("/")
-        name = path.split("/")[-1]
-        display = "  " * depth + name
-
-        formatted.append(display)
-        mapping[display] = path
-
-    return formatted, mapping
 
 # ------------------ TOAST ------------------
 
+# ── Icon glyphs per level (unicode, no emoji rendering issues on most OSes) ──
+_ICONS = {
+    "info":    "ℹ",
+    "success": "✓",
+    "error":   "✕",
+    "warning": "⚠",
+}
+
+# ── Per-level color tokens ────────────────────────────────────────────────────
+_STYLES = {
+    "info": {
+        "bg":           "rgba(13, 17, 23, 242)",
+        "border":       "rgba(48, 54, 61, 255)",
+        "accent":       "rgba(56, 139, 253, 255)",       # blue bar
+        "icon_bg":      "rgba(31, 111, 235, 0.15)",
+        "icon_color":   "#58a6ff",
+        "text":         "#e6edf3",
+        "sub":          "#8b949e",
+    },
+    "success": {
+        "bg":           "rgba(13, 17, 23, 242)",
+        "border":       "rgba(48, 54, 61, 255)",
+        "accent":       "rgba(46, 160, 67, 255)",        # green bar
+        "icon_bg":      "rgba(46, 160, 67, 0.15)",
+        "icon_color":   "#3fb950",
+        "text":         "#e6edf3",
+        "sub":          "#8b949e",
+    },
+    "error": {
+        "bg":           "rgba(13, 17, 23, 242)",
+        "border":       "rgba(48, 54, 61, 255)",
+        "accent":       "rgba(248, 81, 73, 255)",        # red bar
+        "icon_bg":      "rgba(248, 81, 73, 0.15)",
+        "icon_color":   "#f85149",
+        "text":         "#e6edf3",
+        "sub":          "#8b949e",
+    },
+    "warning": {
+        "bg":           "rgba(13, 17, 23, 242)",
+        "border":       "rgba(48, 54, 61, 255)",
+        "accent":       "rgba(210, 153, 34, 255)",       # amber bar
+        "icon_bg":      "rgba(210, 153, 34, 0.15)",
+        "icon_color":   "#e3b341",
+        "text":         "#e6edf3",
+        "sub":          "#8b949e",
+    },
+}
+
+
 class Toast(QLabel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setWordWrap(True)
-        self._apply_style("info")
+    def __init__(self):
+        super().__init__(None)
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        # ── Inner label (actual content) ──────────────────────────────────────
+        self.label = QLabel(self)
+        self.label.setWordWrap(True)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+
         self.hide()
 
+    # ── Style ─────────────────────────────────────────────────────────────────
+
     def _apply_style(self, level):
-        styles = {
-            "info": ("rgba(20, 20, 20, 230)", "rgba(255, 255, 255, 40)"),
-            "success": ("rgba(16, 60, 30, 235)", "rgba(80, 220, 130, 120)"),
-            "error": ("rgba(70, 22, 22, 235)", "rgba(255, 110, 110, 120)")
-        }
-        bg, border = styles.get(level, styles["info"])
-        self.setStyleSheet(f"""
+        s = _STYLES.get(level, _STYLES["info"])
+        icon = _ICONS.get(level, "ℹ")
+
+        # Single-label approach: icon + text baked into rich text via HTML,
+        # keeping the original single-QLabel structure intact.
+        self._current_icon = icon
+        self._current_s = s
+
+        self.label.setStyleSheet(f"""
             QLabel {{
-                background: {bg};
-                color: white;
-                border: 1px solid {border};
-                border-radius: 10px;
-                padding: 6px 10px;
-                font-size: 10px;
-                font-weight: 500;
+                background: {s['bg']};
+                color: {s['text']};
+                border: 1px solid {s['border']};
+                border-left: 3px solid {s['accent']};
+                border-radius: 12px;
+                padding: 11px 18px 11px 14px;
+                font-size: 13px;
+                font-weight: 400;
+                font-family: 'SF Pro Display', 'Segoe UI Variable', 'Inter', system-ui, sans-serif;
             }}
         """)
 
+    # ── Show ──────────────────────────────────────────────────────────────────
+
     def show_message(self, text, level="info", duration=2200):
         self._apply_style(level)
-        self.setText(text)
-        self.setMaximumWidth(max(180, self.parent().width() - 16))
-        self.adjustSize()
-        self.move(
-            (self.parent().width() - self.width()) // 2,
-            self.parent().height() - self.height() - 12
+
+        s = self._current_s
+        icon = self._current_icon
+
+        # Compose HTML: colored icon badge + message text side by side
+        self.label.setText(
+            f'<span style="color:{s["icon_color"]};font-weight:600;">{icon}</span>'
+            f'&nbsp;&nbsp;'
+            f'<span style="color:{s["text"]};">{text}</span>'
         )
+
+        self.setMinimumWidth(300)
+        self.setMaximumWidth(480)
+
+        self.adjustSize()
+
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - self.width()) // 2
+        y = screen.height() - self.height() - 80
+
+        self.move(x, y)
+
+        self.setWindowOpacity(0)
         self.show()
-        QTimer.singleShot(duration, self.hide)
+
+        # Fade in — ease out for snappy feel
+        self.fade_in = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_in.setDuration(180)
+        self.fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.fade_in.setStartValue(0)
+        self.fade_in.setEndValue(1)
+        self.fade_in.start()
+
+        QTimer.singleShot(duration, self.fade_out)
+
+    # ── Fade out ──────────────────────────────────────────────────────────────
+
+    def fade_out(self):
+        self.fade_out_anim = QPropertyAnimation(self, b"windowOpacity")
+        self.fade_out_anim.setDuration(220)
+        self.fade_out_anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        self.fade_out_anim.setStartValue(1)
+        self.fade_out_anim.setEndValue(0)
+        self.fade_out_anim.finished.connect(self.hide)
+        self.fade_out_anim.start()
+
 
 # ------------------ SESSION DIALOG ------------------
+
+SESSION_DIALOG_STYLE = """
+/* ── Root dialog ─────────────────────────────────────────── */
+QDialog {
+    background-color: #0d1117;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+    border-radius: 16px;
+}
+
+/* ── Section labels ──────────────────────────────────────── */
+QLabel#sectionLabel {
+    color: #8b949e;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+}
+
+/* ── Selected path label ─────────────────────────────────── */
+QLabel#pathLabel {
+    color: #58a6ff;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    padding: 4px 10px;
+    background: rgba(88, 166, 255, 0.08);
+    border: 1px solid rgba(88, 166, 255, 0.18);
+    border-radius: 6px;
+}
+
+/* ── Warning / suggestion label ─────────────────────────── */
+QLabel#warnLabel {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    color: #e3b341;
+    padding-left: 2px;
+}
+
+/* ── Name input ──────────────────────────────────────────── */
+QLineEdit#nameInput {
+    background: #161b22;
+    border: 1.5px solid #30363d;
+    border-radius: 10px;
+    padding: 10px 14px;
+    color: #e6edf3;
+    font-size: 13px;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    selection-background-color: rgba(88, 166, 255, 0.35);
+}
+QLineEdit#nameInput:focus {
+    border: 1.5px solid #388bfd;
+    background: #1a2130;
+}
+QLineEdit#nameInput[invalid="true"] {
+    border: 1.5px solid #f85149;
+    background: rgba(248, 81, 73, 0.07);
+}
+
+/* ── Folder tree ─────────────────────────────────────────── */
+QTreeWidget#folderTree {
+    background: #161b22;
+    border: 1.5px solid #30363d;
+    border-radius: 12px;
+    padding: 6px 4px;
+    color: #c9d1d9;
+    outline: none;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+QTreeWidget#folderTree::item {
+    padding: 5px 6px;
+    border-radius: 7px;
+    margin: 1px 2px;
+}
+QTreeWidget#folderTree::item:hover {
+    background: rgba(88, 166, 255, 0.10);
+    color: #e6edf3;
+}
+QTreeWidget#folderTree::item:selected {
+    background: rgba(88, 166, 255, 0.22);
+    color: #58a6ff;
+    border: none;
+}
+QTreeWidget#folderTree::branch {
+    background: transparent;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 6px;
+}
+QScrollBar::handle:vertical {
+    background: #30363d;
+    border-radius: 3px;
+    min-height: 20px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* ── Divider ─────────────────────────────────────────────── */
+QFrame#divider {
+    background: #21262d;
+    max-height: 1px;
+    border: none;
+}
+
+/* ── Cancel button ───────────────────────────────────────── */
+QPushButton#cancelBtn {
+    background: transparent;
+    border: 1.5px solid #30363d;
+    border-radius: 9px;
+    padding: 8px 18px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #8b949e;
+    min-width: 80px;
+}
+QPushButton#cancelBtn:hover {
+    background: #21262d;
+    border-color: #8b949e;
+    color: #c9d1d9;
+}
+QPushButton#cancelBtn:pressed {
+    background: #161b22;
+}
+
+/* ── OK / Start button ───────────────────────────────────── */
+QPushButton#okBtn {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #1f6feb,
+        stop:1 #388bfd
+    );
+    border: none;
+    border-radius: 9px;
+    padding: 8px 20px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #ffffff;
+    min-width: 80px;
+}
+QPushButton#okBtn:hover {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #388bfd,
+        stop:1 #58a6ff
+    );
+}
+QPushButton#okBtn:pressed {
+    background: #1158c7;
+}
+"""
+
 
 class SessionNameDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Start Session")
+        self.setWindowTitle("New Session")
         self.setModal(True)
-        self.setFixedWidth(340)
+        self.setFixedSize(460, 480)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        raw_folders = get_folders()
-        display_folders, self.folder_map = format_folders_for_tree(raw_folders)
+        self.setStyleSheet(SESSION_DIALOG_STYLE)
+        self._build_ui()
 
-        self.setStyleSheet("""
-            QDialog {
-                background: #0f1424;
-                color: #e8ecff;
-                border: 1px solid rgba(255, 255, 255, 30);
-                border-radius: 14px;
-            }
-            QLabel {
-                color: #cfd8ff;
-                font-size: 11px;
-            }
-            QLineEdit, QComboBox {
-                background: rgba(255, 255, 255, 18);
-                border: 1px solid rgba(255, 255, 255, 40);
-                border-radius: 10px;
-                padding: 8px 10px;
-                color: white;
-                font-size: 11px;
-            }
-            QComboBox QAbstractItemView {
-                background: #0f1424;
-                selection-background-color: rgba(90,150,255,120);
-                border-radius: 8px;
-                padding: 4px;
-            }
-            QPushButton {
-                border: none;
-                border-radius: 10px;
-                padding: 8px 14px;
-                font-size: 10px;
-                font-weight: 600;
-            }
-            QPushButton#cancelBtn {
-                background: rgba(255,255,255,20);
-                color: #d6dcf5;
-            }
-            QPushButton#okBtn {
-                background: rgba(72,140,255,220);
-                color: white;
-            }
-            QPushButton:hover#okBtn {
-                background: rgba(90,150,255,255);
+    # ── UI construction ───────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        # Outer container (gives us the rounded border + shadow feel)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QWidget(self)
+        card.setObjectName("card")
+        card.setStyleSheet("""
+            QWidget#card {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 16px;
             }
         """)
+        outer.addWidget(card)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root = QVBoxLayout(card)
+        root.setContentsMargins(20, 20, 20, 18)
+        root.setSpacing(0)
 
-        # ---- Session Name ----
-        title = QLabel("Session Name")
+        # ── Header row ────────────────────────────────────────────────────────
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+
+        title_lbl = QLabel("Start Session")
+        title_lbl.setStyleSheet("""
+            font-size: 15px;
+            font-weight: 700;
+            color: #e6edf3;
+            letter-spacing: -0.3px;
+        """)
+
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(26, 26)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #6e7681;
+                font-size: 18px;
+                font-weight: 400;
+                border-radius: 6px;
+                padding-bottom: 2px;
+            }
+            QPushButton:hover {
+                background: #21262d;
+                color: #e6edf3;
+            }
+        """)
+        close_btn.clicked.connect(self.reject)
+
+        header.addWidget(title_lbl)
+        header.addStretch()
+        header.addWidget(close_btn)
+        root.addLayout(header)
+        root.addSpacing(18)
+
+        # ── Session name section ──────────────────────────────────────────────
+        name_lbl = QLabel("SESSION NAME")
+        name_lbl.setObjectName("sectionLabel")
+        root.addWidget(name_lbl)
+        root.addSpacing(6)
+
         self.name_input = QLineEdit()
+        self.name_input.setObjectName("nameInput")
         self.name_input.setPlaceholderText("e.g. transformers-notes")
+        self.name_input.textChanged.connect(self._update_suggestions)
+        root.addWidget(self.name_input)
+        root.addSpacing(5)
 
-        # ---- Folder ----
-        folder_label = QLabel("Folder")
+        self.suggestion_label = QLabel("")
+        self.suggestion_label.setObjectName("warnLabel")
+        self.suggestion_label.setFixedHeight(16)
+        root.addWidget(self.suggestion_label)
+        root.addSpacing(14)
 
-        self.folder_combo = QComboBox()
-        self.folder_combo.setEditable(False)
+        # ── Divider ────────────────────────────────────────────────────────────
+        div = QFrame()
+        div.setObjectName("divider")
+        div.setFrameShape(QFrame.Shape.HLine)
+        root.addWidget(div)
+        root.addSpacing(14)
 
-        self.folder_combo.addItem("Root")
-        for f in display_folders:
-            self.folder_combo.addItem(f)
+        # ── Folder section ────────────────────────────────────────────────────
+        folder_lbl = QLabel("SAVE IN FOLDER")
+        folder_lbl.setObjectName("sectionLabel")
+        root.addWidget(folder_lbl)
+        root.addSpacing(6)
 
-        # ---- Buttons ----
+        self.folder_tree = QTreeWidget()
+        self.folder_tree.setObjectName("folderTree")
+        self.folder_tree.setHeaderHidden(True)
+        self.folder_tree.setUniformRowHeights(True)
+        self.folder_tree.setAnimated(True)
+        self.folder_tree.setIndentation(16)
+        self.folder_tree.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.folder_tree.setExpandsOnDoubleClick(True)
+        self.folder_tree.setItemsExpandable(True)
+        root.addWidget(self.folder_tree, stretch=1)
+        root.addSpacing(8)
+
+        self.selected_path_label = QLabel("/ root")
+        self.selected_path_label.setObjectName("pathLabel")
+        root.addWidget(self.selected_path_label)
+        root.addSpacing(16)
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        div2 = QFrame()
+        div2.setObjectName("divider")
+        div2.setFrameShape(QFrame.Shape.HLine)
+        root.addWidget(div2)
+        root.addSpacing(14)
+
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addStretch()
 
         cancel_btn = QPushButton("Cancel")
-        ok_btn = QPushButton("Start")
-
         cancel_btn.setObjectName("cancelBtn")
-        ok_btn.setObjectName("okBtn")
-
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setShortcut("Esc")
         cancel_btn.clicked.connect(self.reject)
+
+        ok_btn = QPushButton("▶  Start")
+        ok_btn.setObjectName("okBtn")
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setDefault(True)
+        ok_btn.setAutoDefault(True)
         ok_btn.clicked.connect(self.accept)
 
         buttons.addWidget(cancel_btn)
         buttons.addWidget(ok_btn)
-
-        # ---- Layout ----
-        root.addWidget(title)
-        root.addWidget(self.name_input)
-        root.addWidget(folder_label)
-        root.addWidget(self.folder_combo)
         root.addLayout(buttons)
+
+        # ── Populate & wire ───────────────────────────────────────────────────
+        self._populate_folder_tree(get_folders())
+        self.folder_tree.itemSelectionChanged.connect(self._on_folder_selection_changed)
+        self._update_suggestions("")
+
+    # ── Core logic (UNCHANGED) ────────────────────────────────────────────────
+
+    def _populate_folder_tree(self, folder_paths):
+        self.folder_tree.clear()
+
+        folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+
+        root_item = QTreeWidgetItem(["Root"])
+        root_item.setData(0, Qt.ItemDataRole.UserRole, "")
+        root_item.setIcon(0, folder_icon)
+        root_item.setExpanded(True)
+        self.folder_tree.addTopLevelItem(root_item)
+
+        nodes_by_path = {"": root_item}
+
+        from pathlib import Path
+
+        for rel_path in sorted(folder_paths):
+            parts = Path(rel_path).parts
+            if not parts:
+                continue
+
+            parent_item = root_item
+
+            for i, part in enumerate(parts):
+                current_path = "/".join(parts[: i + 1])
+
+                if current_path in nodes_by_path:
+                    parent_item = nodes_by_path[current_path]
+                    continue
+
+                item = QTreeWidgetItem([part])
+                item.setData(0, Qt.ItemDataRole.UserRole, current_path)
+                item.setIcon(0, folder_icon)
+
+                parent_item.addChild(item)
+                nodes_by_path[current_path] = item
+
+                parent_item = item
+
+        self.folder_tree.setCurrentItem(root_item)
+        self.folder_tree.expandItem(root_item)
+
+    def _on_folder_selection_changed(self):
+        folder = self._selected_folder()
+        display = f"/ {folder.replace('/', '  /  ')}" if folder else "/ root"
+        self.selected_path_label.setText(display)
+
+    def _update_suggestions(self, text):
+        text = text.strip().lower()
+
+        if not text:
+            self.suggestion_label.setText("")
+            self.name_input.setProperty("invalid", False)
+            self.name_input.style().unpolish(self.name_input)
+            self.name_input.style().polish(self.name_input)
+            return
+
+        folder = self._selected_folder()
+        base = NOTES_DIR / folder if folder else NOTES_DIR
+
+        if not base.exists():
+            self.suggestion_label.setText("")
+            return
+
+        files = [f.name for f in base.iterdir() if f.is_file()]
+        input_name = text if text.endswith(".md") else f"{text}.md"
+
+        for f in files:
+            if f.lower() == input_name:
+                self.name_input.setProperty("invalid", True)
+                self.name_input.style().unpolish(self.name_input)
+                self.name_input.style().polish(self.name_input)
+                self.suggestion_label.setText(f"⚠  File already exists: {f}")
+                return
+
+        self.name_input.setProperty("invalid", False)
+        self.name_input.style().unpolish(self.name_input)
+        self.name_input.style().polish(self.name_input)
+
+        base_name = input_name.replace(".md", "")
+        similar = [f for f in files if f.lower().startswith(base_name)]
+
+        if similar:
+            self.suggestion_label.setText(f"⚑  Similar: {', '.join(similar[:2])}")
+        else:
+            self.suggestion_label.setText("")
+
+    def _selected_folder(self) -> str:
+        item = self.folder_tree.currentItem()
+        if not item:
+            return ""
+        value = item.data(0, Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, str) else ""
 
     def get_data(self):
         name = self.name_input.text().strip()
-        selected = self.folder_combo.currentText()
+        return name, self._selected_folder()
 
-        if selected == "Root":
-            folder = ""
-        else:
-            folder = self.folder_map.get(selected, "")
 
-        return name, folder
+from PyQt6.QtWidgets import (
+    QPushButton, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QApplication, QDialog
+)
+from PyQt6.QtCore import Qt, QPoint, QVariantAnimation, QEasingCurve, QPropertyAnimation
+from PyQt6.QtGui import QIcon, QColor, QPainter, QPen, QBrush, QLinearGradient, QRadialGradient
 
-# ------------------ BUTTON ------------------
+
+# ── CircleButton ──────────────────────────────────────────────────────────────
 
 class CircleButton(QPushButton):
     def __init__(self, icon_path, tooltip):
         super().__init__()
 
-        self.base_alpha = 0.06
+        self.base_alpha = 0.0
 
         self.setFixedSize(44, 44)
         self.setToolTip(tooltip)
         self.setIcon(QIcon(icon_path))
-        self.setIconSize(self.size() * 0.5)
+        self.setIconSize(self.size() * 0.48)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self.update_style(self.base_alpha)
@@ -195,24 +600,52 @@ class CircleButton(QPushButton):
     def update_style(self, alpha):
         self.setStyleSheet(f"""
             QPushButton {{
-                background: rgba(255,255,255,{alpha});
+                background: rgba(255, 255, 255, {alpha});
                 border-radius: 22px;
+                border: 1px solid rgba(255, 255, 255, 0.07);
             }}
             QPushButton:hover {{
-                background: rgba(255,255,255,0.18);
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(255, 255, 255, 0.16);
+            }}
+            QPushButton:pressed {{
+                background: rgba(255, 255, 255, 0.06);
             }}
         """)
 
+    def set_active(self, active: bool):
+        """Highlight button when its feature is in an active/recording state."""
+        if active:
+            self.setStyleSheet("""
+                QPushButton {
+                    background: rgba(248, 81, 73, 0.22);
+                    border-radius: 22px;
+                    border: 1px solid rgba(248, 81, 73, 0.45);
+                }
+                QPushButton:hover {
+                    background: rgba(248, 81, 73, 0.32);
+                }
+            """)
+        else:
+            self.update_style(self.base_alpha)
+
     def pulse(self):
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(600)
-        self.anim.setStartValue(0.06)
-        self.anim.setKeyValueAt(0.5, 0.25)
-        self.anim.setEndValue(0.06)
+        self.anim.setDuration(550)
+        self.anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self.anim.setStartValue(0.0)
+        self.anim.setKeyValueAt(0.4, 0.22)
+        self.anim.setEndValue(0.0)
         self.anim.valueChanged.connect(self.update_style)
         self.anim.start()
 
-# ------------------ MAIN UI ------------------
+
+# ── FloatingPanel ─────────────────────────────────────────────────────────────
+
+_PANEL_BG       = QColor(11, 14, 22, 215)
+_PANEL_BORDER   = QColor(255, 255, 255, 22)
+_DIVIDER_COLOR  = QColor(255, 255, 255, 12)
+
 
 class FloatingPanel(QWidget):
     def __init__(self):
@@ -224,48 +657,114 @@ class FloatingPanel(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
-        self.setFixedSize(74, 320)
+        self.setFixedSize(66, 310)
 
         self.drag_pos = QPoint()
         self.session_active = False
-        self.audio_active = False
+        self.audio_active   = False
 
+        # ── Root layout ───────────────────────────────────────────────────────
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(8, 12, 8, 12)
+        layout.setSpacing(0)
+        layout.setContentsMargins(8, 10, 8, 10)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.brand_label = QLabel("NoteDown")
+        # ── Close button ──────────────────────────────────────────────────────
+        self.close_btn = QPushButton("×")
+        self.close_btn.setFixedSize(18, 18)
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.06);
+                color: rgba(255,255,255,0.35);
+                border: none;
+                border-radius: 9px;
+                font-size: 13px;
+                font-weight: 300;
+                padding-bottom: 1px;
+            }
+            QPushButton:hover {
+                background: rgba(248, 81, 73, 0.75);
+                color: white;
+            }
+        """)
+        self.close_btn.clicked.connect(QApplication.quit)
+
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.addStretch()
+        top_bar.addWidget(self.close_btn)
+
+        # ── Brand label ───────────────────────────────────────────────────────
+        self.brand_label = QLabel("N↓")
         self.brand_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.brand_label.setStyleSheet("""
             QLabel {
-                color: rgba(220, 230, 255, 190);
-                font-size: 9px;
+                color: rgba(140, 170, 255, 200);
+                font-size: 13px;
                 font-weight: 700;
-                letter-spacing: 0.8px;
+                letter-spacing: -0.5px;
             }
         """)
 
-        self.session_btn = CircleButton("ui_utils/start.svg", "Start / End Session")
-        self.text_btn = CircleButton("ui_utils/text.svg", "Capture Text")
-        self.image_btn = CircleButton("ui_utils/image.svg", "Capture Image")
-        self.audio_btn = CircleButton("ui_utils/audio.svg", "Record Audio")
+        # ── Action buttons ────────────────────────────────────────────────────
+        self.session_btn = CircleButton("ui_utils/start.svg",  "Start / End Session")
+        self.text_btn    = CircleButton("ui_utils/text.svg",   "Capture Text")
+        self.image_btn   = CircleButton("ui_utils/image.svg",  "Capture Image")
+        self.audio_btn   = CircleButton("ui_utils/audio.svg",  "Record Audio")
 
+        for btn in (self.session_btn, self.text_btn, self.image_btn, self.audio_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # ── Assemble ──────────────────────────────────────────────────────────
+        layout.addLayout(top_bar)
+        layout.addSpacing(4)
         layout.addWidget(self.brand_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(6)
+        layout.addSpacing(10)
         layout.addWidget(self.session_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.text_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.image_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.audio_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(4)
+        layout.addWidget(self.text_btn,    alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(4)
+        layout.addWidget(self.image_btn,   alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(4)
+        layout.addWidget(self.audio_btn,   alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
 
-        self.toast = Toast(self)
+        # ── Toast ─────────────────────────────────────────────────────────────
+        self.toast = Toast()
 
+        # ── Signals ───────────────────────────────────────────────────────────
         self.session_btn.clicked.connect(self.toggle_session)
         self.text_btn.clicked.connect(self.get_text)
         self.image_btn.clicked.connect(self.get_image)
         self.audio_btn.clicked.connect(self.toggle_audio)
+
+    # ── Paint: pill-shaped frosted panel ─────────────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        r = self.rect().adjusted(1, 1, -1, -1)
+
+        # Background fill
+        painter.setBrush(QBrush(_PANEL_BG))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(r, 20, 20)
+
+        # Subtle top highlight — gives glass depth
+        highlight = QLinearGradient(r.left(), r.top(), r.left(), r.top() + 40)
+        highlight.setColorAt(0, QColor(255, 255, 255, 18))
+        highlight.setColorAt(1, QColor(255, 255, 255, 0))
+        painter.setBrush(QBrush(highlight))
+        painter.drawRoundedRect(r, 20, 20)
+
+        # Border
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(_PANEL_BORDER, 1))
+        painter.drawRoundedRect(r, 20, 20)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _show_action_error(self, error):
         self.toast.show_message(str(error), "error", 3200)
@@ -273,15 +772,10 @@ class FloatingPanel(QWidget):
     def _ensure_session_active(self):
         if self.session_active:
             return True
-        self.toast.show_message("Start session first", "error", 2500)
+        self.toast.show_message("Start a session first", "error", 2500)
         return False
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(QColor(10, 15, 30, 200))
-        painter.setPen(QPen(QColor(255, 255, 255, 40), 1))
-        painter.drawRoundedRect(self.rect(), 18, 18)
+    # ── Actions (logic UNCHANGED) ─────────────────────────────────────────────
 
     def toggle_session(self):
         try:
@@ -291,22 +785,22 @@ class FloatingPanel(QWidget):
 
                 if dialog.exec() == QDialog.DialogCode.Accepted:
                     name, folder = dialog.get_data()
-
                     if not name:
                         return
 
                     core.start_session(name, folder)
-
                     self.session_active = True
                     self.session_btn.setIcon(QIcon("ui_utils/stop.svg"))
+                    self.session_btn.set_active(True)
                     self.toast.show_message("Session started", "success")
-
             else:
                 core.end_session()
                 self.session_active = False
-                self.audio_active = False
+                self.audio_active   = False
                 self.session_btn.setIcon(QIcon("ui_utils/start.svg"))
+                self.session_btn.set_active(False)
                 self.audio_btn.setIcon(QIcon("ui_utils/audio.svg"))
+                self.audio_btn.set_active(False)
                 self.toast.show_message("Session ended", "info")
 
         except Exception as e:
@@ -341,13 +835,17 @@ class FloatingPanel(QWidget):
 
             if self.audio_active:
                 self.audio_btn.setIcon(QIcon("ui_utils/music.svg"))
+                self.audio_btn.set_active(True)
                 self.toast.show_message("Recording...", "info")
             else:
                 self.audio_btn.setIcon(QIcon("ui_utils/audio.svg"))
+                self.audio_btn.set_active(False)
                 self.toast.show_message("Audio saved", "success")
                 self.audio_btn.pulse()
         except Exception as e:
             self._show_action_error(e)
+
+    # ── Drag (UNCHANGED) ──────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -358,7 +856,6 @@ class FloatingPanel(QWidget):
             delta = event.globalPosition().toPoint() - self.drag_pos
             self.move(self.x() + delta.x(), self.y() + delta.y())
             self.drag_pos = event.globalPosition().toPoint()
-
 # ------------------ MAIN ------------------
 
 def main():

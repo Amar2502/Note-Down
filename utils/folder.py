@@ -7,8 +7,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import NOTES_DIR
 
+
 def get_folders():
-    all_folders = []
+    folders = []
 
     for folder in NOTES_DIR.rglob("*"):
         if not folder.is_dir():
@@ -20,6 +21,16 @@ def get_folders():
         ):
             continue
 
-        all_folders.append(str(folder.relative_to(NOTES_DIR)))
+        rel_path = folder.relative_to(NOTES_DIR)
 
-    return sorted(all_folders)
+        folders.append(rel_path.as_posix())
+
+    return sorted(folders)
+
+def get_file_names(folder_path: str):
+    base = NOTES_DIR / folder_path if folder_path else NOTES_DIR
+
+    if not base.exists():
+        return []
+
+    return [f.name for f in base.iterdir() if f.is_file()]
