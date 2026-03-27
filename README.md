@@ -1,63 +1,87 @@
 # NoteDown
 
-<p align="center">
-  <b>⚡ Lightweight, always-on-top quick capture for Obsidian</b>
-</p>
+An always-on-top quick capture tool for Obsidian users. NoteDown lets you capture text, screenshots, and audio into a single Markdown “session” note without breaking your workflow.
 
----
+## Download
 
+Get the latest Windows build here: https://github.com/Amar2502/NoteDown/releases/latest
 
-A lightweight, always-on-top **quick note** app for Windows built with **PyQt6**.  
-It includes a first-run setup flow and stores your paths in `%APPDATA%\NoteDown\config.json`.
+## What It Does
+
+- **Session-based notes**: start a session (creates/continues a `.md` file) and keep appending captures until you end it.
+- **Text capture**: Copy any important text, then click the Clip button – the text is instantly added as a bullet point in your session note.
+- **Screenshot capture**: Take a screenshot (using your usual shortcut), then click the Image button – the latest screenshot is grabbed from your screenshots folder, copied to your Obsidian `Assets/`, and embedded in your note.
+- **Audio capture**: press once to start recording, press again to stop; saves a `.wav` into `Assets/` and embeds it in the note.
+- **Obsidian-friendly output**: attachments are embedded using `![[filename.ext]]` so they resolve inside your vault.
+- **Always on top UI**: a small PyQt6 window designed for fast capture while you stay in your current app.
+
+## How Notes Are Saved
+
+When you start a session, NoteDown creates (or reuses) a Markdown file named after your session:
+
+- Location: **your Obsidian vault root** (or a subfolder you choose in the UI)
+- Filename: session name “sanitized” into a slug (spaces -> `-`, lowercase)
+- Frontmatter: title/date/tags
+
+During the session, captures are appended under `# Session Notes`.
+
+## First Run Setup (Paths)
+
+On first run, NoteDown asks you to configure:
+
+- **Obsidian Vault path** (folder that contains `.obsidian/`)
+- **Assets folder path** (defaults to `<vault>/Assets` and will be created if missing)
+- **Screenshots folder path** (where NoteDown looks for your latest screenshot)
+
+These settings are stored at:
+
+`%APPDATA%/NoteDown/config.json`
+
+To reconfigure later, delete that file and run NoteDown again.
+
+## Usage (Typical Flow)
+
+1. **Start session** → choose a session name (and optional subfolder in your vault)
+2. **Text** → copy something, then press Text to append clipboard content
+3. **Image** → take a screenshot (Win+Shift+S, etc.), then press Image
+4. **Audio** → press Audio to start recording, press again to stop and save
+5. **End session** when you’re done
+
+## Development
 
 ### Requirements
 
-- Python 3.10+ (3.11/3.12 also fine)
-- Windows 10/11
+- Python 3.x (Windows)
+- Dependencies in `requirements.txt`:
+  - PyQt6 (UI)
+  - pyperclip (clipboard text)
+  - PyAudio (microphone recording)
 
-### Install
+### Run from source
 
 ```bash
+python -m venv venv
+.\venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-### Start
-
-```bash
 python start.py
 ```
 
-## Build Windows `.exe` (PyInstaller)
+### Build an executable (PyInstaller)
 
-### One command build (PowerShell)
+This repo includes `NoteDown.spec` for PyInstaller.
 
-Run this from the project root (the folder that contains `start.py` and `NoteDown.ico`):
-
-```powershell
-pyinstaller --noconfirm --clean --windowed --onefile --name "NoteDown" --icon "NoteDown.ico" "start.py" --add-data "ui_utils;ui_utils" --hidden-import "PyQt6.QtMultimedia" --hidden-import "PyQt6.QtMultimediaWidgets"
+```bash
+pip install pyinstaller
+pyinstaller NoteDown.spec
 ```
 
-Your output will be in:
+## Notes / Troubleshooting
 
-- `dist\NoteDown.exe`
+- **No text captured**: NoteDown reads from the clipboard; make sure you copied text first.
+- **No screenshot captured**: NoteDown picks the newest `.png/.jpg/.jpeg` from your configured screenshots folder.
+- **Audio issues**: PyAudio depends on audio drivers/devices; ensure a working microphone is selected and permissions allow recording.
 
-## Project layout
+## License
 
-- `start.py`: app launcher + first-run setup flow
-- `ui.py`: main UI
-- `config.py`: loads paths from `%APPDATA%\NoteDown\config.json`
-- `ui_utils/`: SVG icons + setup video assets bundled into the app
-
-## Where settings are stored
-
-NoteDown reads/writes configuration here:
-
-- `%APPDATA%\NoteDown\config.json`
-
-1. Build the app to get `dist\NoteDown.exe`
-2. On GitHub: **Releases → Draft a new release**
-3. Attach `NoteDown.exe` as a **release asset**
-4. Copy the “latest release” link into the **Download** section above
-
-Licensed under the MIT License. See the LICENSE file for details.
+MIT (see `LICENSE`).
 
